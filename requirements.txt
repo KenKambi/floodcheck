@@ -1,0 +1,19 @@
+# FloodCheck backend — Python 3.10 to 3.12
+# Web server
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pydantic>=2.5
+# Flood model
+numpy>=1.24
+scipy>=1.11
+numba>=0.59
+rasterio>=1.3.9
+pillow>=10.0
+# Exposure (buildings, roads, facilities)
+shapely>=2.0
+pyarrow>=14.0
+overturemaps>=0.6
+# Satellite imagery
+rio-tiler>=6.2
+pystac-client>=0.7
+planetary-computer>=1.0

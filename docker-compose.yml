@@ -1,0 +1,9 @@
+services:
+  floodcheck:
+    build: .
+    image: atlas/floodcheck:latest
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./results:/app/results      # keep GeoTIFF results on the host
+    restart: unless-stopped

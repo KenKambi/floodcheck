@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+.numba_cache/
+results/*
+!results/.gitkeep
+.ipynb_checkpoints/
+.pytest_cache/
+.DS_Store
