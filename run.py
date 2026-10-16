@@ -30,7 +30,7 @@ BACKEND = os.path.join(ROOT, "backend")
 def main():
     ap = argparse.ArgumentParser(description="Start the FloodCheck web app.")
     ap.add_argument("--host", default=os.environ.get("FLOOD_HOST", "127.0.0.1"))
-    ap.add_argument("--port", type=int, default=int(os.environ.get("FLOOD_PORT", "8000")))
+    ap.add_argument("--port", type=int, default=int(os.environ.get("PORT") or os.environ.get("FLOOD_PORT", "8000")))  # PORT: set by hosts such as Render
     ap.add_argument("--reload", action="store_true", help="Restart when backend code changes (development only)")
     args = ap.parse_args()
 

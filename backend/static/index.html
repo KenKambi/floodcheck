@@ -20,48 +20,62 @@
     <h1 class="app-name">FloodCheck<small>See where flood water could reach in your community</small></h1>
   </header>
 
-  <aside class="panel" aria-label="Flood check controls">
-    <div class="panel-scroll">
-      <p class="intro">Three simple steps: mark your area on the map, say how much rain, then press the green button.</p>
+  <aside class="panel" aria-label="Flood check controls" data-sheet="half">
+    <button type="button" class="sheet-handle" id="sheet-handle" aria-controls="panel-scroll" aria-expanded="true">
+      <span class="grabber" aria-hidden="true"></span><span id="sheet-label">Show more map</span>
+    </button>
+    <nav class="tabs" role="tablist" aria-label="FloodCheck sections">
+      <button role="tab" class="tab" id="tab-area" data-tab="area" aria-selected="true" aria-controls="pane-area">Area</button>
+      <button role="tab" class="tab" id="tab-rain" data-tab="rain" aria-selected="false" aria-controls="pane-rain">Rain</button>
+      <button role="tab" class="tab" id="tab-results" data-tab="results" aria-selected="false" aria-controls="pane-results">Results <span class="tab-badge" id="results-badge" hidden>1</span></button>
+      <button role="tab" class="tab" id="tab-report" data-tab="report" aria-selected="false" aria-controls="pane-report">Report</button>
+    </nav>
+    <div class="panel-scroll" id="panel-scroll">
 
-      <section class="step" id="step-area">
-        <div class="step-head"><span class="step-num" aria-hidden="true">1</span><h2>Mark your area</h2></div>
-        <div class="step-body">
-          <label for="place-q" class="search-label">Find your place</label>
+      <!-- ===================== AREA ===================== -->
+      <div class="pane" id="pane-area" role="tabpanel" aria-labelledby="tab-area">
+        <section class="sec" id="step-area">
+          <h2 class="sec-title">Set your area</h2>
+          <p class="sec-sub">The flood check covers the box you mark on the map. Keep each side under about <span id="max-km">44</span> km.</p>
+          <button class="btn btn-primary btn-wide" id="draw-btn" aria-pressed="false"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h4M16 4h4v4M20 16v4h-4M8 20H4v-4M4 10v4M20 10v4M10 4h4M10 20h4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>Draw my area on the map</button>
+          <button class="btn btn-wide" id="example-btn"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>Use an example area</button>
+
+          <label for="place-q" class="sec-label">Search for a place</label>
           <div class="search-row" role="search">
             <input type="search" id="place-q" placeholder="Village, town, school or market" autocomplete="off" enterkeyhint="search" aria-describedby="place-help">
-            <button class="btn btn-search" id="place-btn" type="button">Search</button>
+            <button class="btn btn-search" id="place-btn" type="button" aria-label="Search"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2.2"/><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg><span>Search</span></button>
           </div>
           <p class="hint" id="place-help">Or type coordinates, for example -0.45, 39.65.</p>
           <ul class="place-results" id="place-results" aria-live="polite"></ul>
-          <p class="hint search-or">Or draw it yourself: press the button, then tap one corner of your area on the map and then the opposite corner. Keep each side under about 44 km.</p>
-          <div class="btn-row">
-            <button class="btn" id="draw-btn" aria-pressed="false">Draw my area</button>
-            <button class="btn-link" id="example-btn">Use an example area</button>
-          </div>
-          <div class="readout" id="area-readout" aria-live="polite">No area marked yet.</div>
-        </div>
-      </section>
 
-      <section class="step" id="step-storm">
-        <div class="step-head"><span class="step-num" aria-hidden="true">2</span><h2>How much rain?</h2></div>
-        <div class="step-body">
+          <div class="coord-card" id="area-readout" aria-live="polite">No area marked yet.</div>
+          <p class="hint regions-note" id="regions-note" hidden>Areas outlined in teal on the map are prepared ahead of time, so checks there are much faster.</p>
+          <button class="btn btn-next btn-wide" id="next-rain" data-goto="rain" hidden>Next: choose the rain <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h13M13 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        </section>
+      </div>
+
+      <!-- ===================== RAIN ===================== -->
+      <div class="pane" id="pane-rain" role="tabpanel" aria-labelledby="tab-rain" hidden>
+        <div class="area-banner" id="rain-area" hidden></div>
+        <section class="sec" id="step-storm">
+          <h2 class="sec-title">How much rain?</h2>
+          <p class="sec-sub">Use real rainfall for a date, or choose an amount yourself.</p>
           <div class="seg seg-2" role="radiogroup" aria-label="Where the rain amount comes from">
             <input type="radio" name="rainsrc" id="rs-real" value="real" checked><label for="rs-real">Real weather</label>
             <input type="radio" name="rainsrc" id="rs-own" value="own"><label for="rs-own">Choose myself</label>
           </div>
           <div class="real-weather" id="real-weather">
-            <p class="hint">Pick a date. Past dates use measured rain; dates in the next 16 days use the forecast.</p>
+            <p class="hint">Past dates use measured rain; dates in the next 16 days use the forecast.</p>
             <div class="real-grid">
-              <div class="field"><label for="wx-date">Last day of rain</label><input type="date" id="wx-date" min="1940-01-10"></div>
-              <div class="field"><label for="wx-days">Days of rain</label>
+              <div class="field"><label for="wx-date" class="sec-label">Last day of rain</label><input type="date" id="wx-date" min="1940-01-10"></div>
+              <div class="field"><label for="wx-days" class="sec-label">Days of rain</label>
                 <select id="wx-days"><option>1</option><option>2</option><option selected>3</option><option>5</option><option>7</option></select></div>
             </div>
-            <button class="btn" id="wx-btn">Get rainfall</button>
+            <button class="btn btn-accent btn-wide" id="wx-btn"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 15a4 4 0 0 1-.5-8 5.5 5.5 0 0 1 10.6 1.5A3.5 3.5 0 0 1 17 15z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M9 18l-1 2.5M13 18l-1 2.5M17 18l-1 2.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>Get rainfall</button>
             <div id="wx-result" aria-live="polite"></div>
           </div>
           <div id="own-presets">
-            <span class="label" style="font-weight:700;font-size:15px">Quick choice</span>
+            <span class="sec-label">Quick choice</span>
             <div class="presets" role="group" aria-label="Quick rain amounts">
               <button type="button" data-mm="30" data-h="6"><b>30 mm</b>Light</button>
               <button type="button" data-mm="75" data-h="12"><b>75 mm</b>Heavy</button>
@@ -70,93 +84,117 @@
             </div>
           </div>
           <div class="field" style="margin-top:12px">
-            <label for="rain-range">Total rain</label>
+            <label for="rain-range" class="sec-label">Total rain</label>
             <div class="num-row">
               <input type="range" id="rain-range" min="10" max="400" step="5" value="100" aria-label="Total rain in millimetres">
               <div class="unit-input"><input type="number" id="rain-mm" min="1" max="1000" value="100" aria-label="Total rain"><span>mm</span></div>
             </div>
           </div>
-          <div class="field">
-            <label for="rain-hours">Falling over</label>
+          <div class="field" style="margin-bottom:0">
+            <label for="rain-hours" class="sec-label">Falling over</label>
             <div class="unit-input" style="width:150px"><input type="number" id="rain-hours" min="0.5" max="240" step="0.5" value="24"><span>hours</span></div>
           </div>
-          <div class="field" style="margin-bottom:0">
-            <span class="label" id="wet-label">Ground before the rain <span class="sub">(wet ground soaks up less)</span></span>
-            <div class="seg" role="radiogroup" aria-labelledby="wet-label">
-              <input type="radio" name="wetness" id="wet-dry" value="dry"><label for="wet-dry">Dry</label>
-              <input type="radio" name="wetness" id="wet-normal" value="normal" checked><label for="wet-normal">Normal</label>
-              <input type="radio" name="wetness" id="wet-wet" value="wet"><label for="wet-wet">Wet</label>
+        </section>
+
+        <section class="sec">
+          <h2 class="sec-title" id="wet-label">Ground before the rain</h2>
+          <p class="sec-sub">Wet ground soaks up less water, so floods are bigger.</p>
+          <div class="seg" role="radiogroup" aria-labelledby="wet-label">
+            <input type="radio" name="wetness" id="wet-dry" value="dry"><label for="wet-dry">Dry</label>
+            <input type="radio" name="wetness" id="wet-normal" value="normal" checked><label for="wet-normal">Normal</label>
+            <input type="radio" name="wetness" id="wet-wet" value="wet"><label for="wet-wet">Wet</label>
+          </div>
+        </section>
+
+        <section class="sec" id="step-inflow">
+          <h2 class="sec-title">Big river coming in <span class="optional">(optional)</span></h2>
+          <p class="sec-sub">A large river can bring flood water from far away. Tap where it enters your area, then get its real flow or type it in.</p>
+          <div id="inflow-list"></div>
+          <button class="btn btn-wide" id="inflow-btn" aria-pressed="false"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 9c3-2 6 2 9 0s6-2 9 0M3 15c3-2 6 2 9 0s6-2 9 0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>Mark where the river enters</button>
+        </section>
+      </div>
+
+      <!-- ===================== RESULTS ===================== -->
+      <div class="pane" id="pane-results" role="tabpanel" aria-labelledby="tab-results" hidden>
+        <section class="sec empty" id="results-empty">
+          <h2 class="sec-title">No results yet</h2>
+          <p class="sec-sub" id="results-empty-text">Set your area, choose the rain, then press <strong>Check for floods</strong>.</p>
+        </section>
+
+        <section class="status" id="status" hidden aria-live="polite">
+          <h2 id="status-title">Checking for floods</h2>
+          <div id="status-text"></div>
+          <ul class="log" id="status-log"></ul>
+        </section>
+
+        <section class="results" id="results" hidden aria-live="polite">
+          <div class="res-place" id="res-place"></div>
+          <div class="verdict" id="verdict" data-level="0">
+            <div class="verdict-top">
+              <p class="verdict-kicker">Flood risk for this rain</p>
+              <p class="verdict-title" id="verdict-title"></p>
+              <div class="meter" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
+              <div class="meter-labels" aria-hidden="true"><span>Low</span><span>Some</span><span>Serious</span><span>Severe</span></div>
+            </div>
+            <div class="verdict-body">
+              <p id="verdict-text"></p>
+              <h3>What to do</h3>
+              <ul class="todo" id="verdict-do"></ul>
+              <p class="verdict-note">This is a simple guide from this model run. Always follow official weather and flood warnings.</p>
             </div>
           </div>
-        </div>
-      </section>
 
-      <section class="step" id="step-inflow">
-        <div class="step-head"><span class="step-num" aria-hidden="true">3</span><h2>Big river coming in <span class="optional">(optional)</span></h2></div>
-        <div class="step-body">
-          <p class="hint">A large river can bring flood water from far away. Tap where it enters your area, then get its real flow or type it in.</p>
-          <div id="inflow-list"></div>
-          <button class="btn" id="inflow-btn" aria-pressed="false">Mark where the river enters</button>
-        </div>
-      </section>
-
-      <section class="status" id="status" hidden aria-live="polite">
-        <h2 id="status-title">Checking for floods</h2>
-        <div id="status-text"></div>
-        <ul class="log" id="status-log"></ul>
-      </section>
-
-      <section class="results" id="results" hidden aria-live="polite">
-        <div class="verdict" id="verdict" data-level="0">
-          <div class="verdict-top">
-            <p class="verdict-kicker">Flood risk for this rain</p>
-            <p class="verdict-title" id="verdict-title"></p>
-            <div class="meter" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
-            <div class="meter-labels" aria-hidden="true"><span>Low</span><span>Some</span><span>Serious</span><span>Severe</span></div>
+          <div class="headline-block">
+            <div class="headline" id="res-area"></div>
+            <p class="headline-sub" id="res-sub"></p>
+            <dl class="facts">
+              <div><dt>Deepest water</dt><dd id="res-max"></dd></div>
+              <div><dt>Average depth</dt><dd id="res-mean"></dd></div>
+              <div><dt>Deeper than 1 m</dt><dd id="res-deep"></dd></div>
+              <div><dt>Rain that ran off</dt><dd id="res-runoff"></dd></div>
+            </dl>
+            <p class="hint" style="margin:10px 0 0">Tap anywhere on the map to see how deep the water is there.</p>
           </div>
-          <div class="verdict-body">
-            <p id="verdict-text"></p>
-            <h3>What to do</h3>
-            <ul class="todo" id="verdict-do"></ul>
-            <p class="verdict-note">This is a simple guide from this model run. Always follow official weather and flood warnings.</p>
+
+          <div class="card" id="expo" hidden>
+            <h3>Homes, roads and services in the water</h3>
+            <p class="hint" id="expo-buildings-head"></p>
+            <ul class="band-list" id="expo-bands"></ul>
+            <p class="hint" id="expo-roads" style="margin-top:10px"></p>
+            <p class="hint" id="expo-fac-head" style="margin:10px 0 0"></p>
+            <ul class="fac-list" id="expo-fac"></ul>
           </div>
-        </div>
 
-        <div class="headline-block">
-          <div class="headline" id="res-area"></div>
-          <p class="headline-sub" id="res-sub"></p>
-          <dl class="facts">
-            <div><dt>Deepest water</dt><dd id="res-max"></dd></div>
-            <div><dt>Average depth</dt><dd id="res-mean"></dd></div>
-            <div><dt>Deeper than 1 m</dt><dd id="res-deep"></dd></div>
-            <div><dt>Rain that ran off</dt><dd id="res-runoff"></dd></div>
-          </dl>
-          <p class="hint" style="margin:10px 0 0">Tap anywhere on the map to see how deep the water is there.</p>
-        </div>
+          <details class="card profile">
+            <summary>Look across a river (cross-section)</summary>
+            <p class="hint">Draw a line across a river to see the ground and the flood water along it.</p>
+            <button class="btn" id="profile-btn" aria-pressed="false"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="18" r="2" fill="currentColor"/><circle cx="19" cy="6" r="2" fill="currentColor"/><path d="M6.5 16.5l11-9" stroke="currentColor" stroke-width="2" stroke-dasharray="3 2.5"/></svg>Draw a line</button>
+            <div id="profile-chart"></div>
+            <div class="profile-readout" id="profile-readout" aria-live="polite"></div>
+          </details>
+          <ul class="notes" id="res-notes"></ul>
+          <button class="btn btn-next btn-wide" data-goto="report">Get the report <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h13M13 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        </section>
+      </div>
 
-        <div class="card" id="expo" hidden>
-          <h3>Homes, roads and services in the water</h3>
-          <p class="hint" id="expo-buildings-head"></p>
-          <ul class="band-list" id="expo-bands"></ul>
-          <p class="hint" id="expo-roads" style="margin-top:10px"></p>
-          <p class="hint" id="expo-fac-head" style="margin:10px 0 0"></p>
-          <ul class="fac-list" id="expo-fac"></ul>
-        </div>
-
-        <details class="card profile">
-          <summary>Look across a river (cross-section)</summary>
-          <p class="hint">Draw a line across a river to see the ground and the flood water along it.</p>
-          <button class="btn" id="profile-btn" aria-pressed="false">Draw a line</button>
-          <div id="profile-chart"></div>
-          <div class="profile-readout" id="profile-readout" aria-live="polite"></div>
-        </details>
-
-        <ul class="notes" id="res-notes"></ul>
-        <div class="results-actions">
-          <a class="btn" id="res-download" href="#" download>Download flood map (GeoTIFF)</a>
-        </div>
+      <!-- ===================== REPORT ===================== -->
+      <div class="pane" id="pane-report" role="tabpanel" aria-labelledby="tab-report" hidden>
+        <section class="sec empty" id="report-empty">
+          <h2 class="sec-title">No report yet</h2>
+          <p class="sec-sub" id="report-empty-text">Run a flood check first. The report will then be ready to download here.</p>
+        </section>
+        <section class="sec" id="report-ready" hidden>
+          <h2 class="sec-title">Download</h2>
+          <p class="report-for">Report for <strong id="report-place"></strong></p>
+          <p class="sec-sub">A printable PDF with the flood map, the risk level, what is in the water and what to do. Good for sharing with leaders and planners.</p>
+          <a class="btn btn-primary btn-wide" id="res-pdf" href="#" download><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h7l5 5v13H7z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M14 3v5h5M10 13v5M10 18h4M10 13h3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>Download PDF report</a>
+          <p class="hint pdf-msg" id="pdf-msg" aria-live="polite"></p>
+          <span class="sec-label">For GIS software</span>
+          <a class="btn btn-wide" id="res-download" href="#" download><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4l9 5-9 5-9-5zM3 14l9 5 9-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>Flood depth (GeoTIFF)</a>
+          <p class="hint" style="margin-top:8px">The GeoTIFF holds water depth in metres for every 30 m cell. Open it in QGIS or ArcGIS.</p>
+        </section>
         <p class="disclaimer">A quick estimate from global satellite data. It shows where flooding is likely, not an engineering flood study, and it can miss walls, culverts and drains. Local knowledge matters: check the map against what your community has seen in past floods.</p>
-      </section>
+      </div>
     </div>
 
     <div class="run-bar">
@@ -166,18 +204,20 @@
   </aside>
 
   <div id="map" role="region" aria-label="Map">
+    <div class="map-overlay-left">
     <div class="map-tools">
       <div class="tool-group" role="group" aria-label="Background map">
         <button id="bm-map" aria-pressed="true">Map</button>
         <button id="bm-sat" aria-pressed="false">Satellite</button>
       </div>
       <div class="tool-group"><button id="terrain-btn" aria-pressed="false">3D view</button></div>
-      <div class="tool-group"><button id="compare-btn" aria-pressed="false">Before / after photos</button></div>
+      <div class="tool-group"><button id="compare-btn" aria-pressed="false"><span class="lbl-long">Before / after photos</span><span class="lbl-short">Compare</span></button></div>
     </div>
     <details class="layers-card" id="layers-card" open hidden>
       <summary>What the map shows</summary>
       <div id="layer-rows"></div>
     </details>
+    </div>
     <div class="compare-bar" id="compare-bar" hidden>
       <div class="cmp-side">
         <label for="cmp-left-src">Left side</label>

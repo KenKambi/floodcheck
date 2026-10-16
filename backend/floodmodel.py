@@ -1,10 +1,17 @@
 """Rapid flood model: rain + terrain -> flood depth, for any area in the country.
 
 Same methodology as the original modelling notebook, reorganised into functions so a web server can call it:
-  load_terrain()  downloads data and builds the flow network for an area (slow part, cached)
-  run_storm()     runs runoff, river flow and flooding for one storm (fast part)
+  load_terrain()        gets the terrain and flow network for an area. Reads it from PREPARED TERRAIN when the
+                        area is inside a prepared region (fast, light), otherwise downloads and builds it live
+                        (slow, needs a lot of memory)
+  run_storm()           runs runoff, river flow and flooding for one storm (fast part)
+  precompute_region()   prepares the terrain for a whole region once, ahead of time (see tools/precompute_terrain.py)
+
+Prepared terrain: everything that depends only on the land (conditioned elevation, flow directions, upstream area,
+longest flow path, land cover, soils) is computed once per region and stored as tiled GeoTIFFs. A live check then
+reads only the small window it needs. Set FLOOD_TERRAIN to the folder or https:// address that holds index.json.
 """
-import os, time, heapq
+import os, json, time, heapq, urllib.request
 import numpy as np
 import rasterio
 from rasterio.crs import CRS
@@ -23,10 +30,15 @@ os.environ.update(GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR", AWS_NO_SIGN_REQUEST=
 
 NODATA = -9999.0
 KENYA_BBOX = (33.8, -4.8, 42.0, 5.1)           # rough country bounds, used to reject areas outside it
-MAX_FOCUS_DEG = 0.40                           # largest area side a user can draw (~44 km)
+MAX_FOCUS_DEG = float(os.environ.get("FLOOD_MAX_SIDE_DEG", "0.40"))   # largest area side a user can draw (0.40 = ~44 km)
+# Where prepared terrain lives: a folder or an https:// address containing index.json (empty = <project>/terrain)
+TERRAIN_STORE = os.environ.get("FLOOD_TERRAIN", "").strip() or os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "terrain")
+# Build terrain live (download + flow tracing) for areas outside the prepared regions? Needs 2-4 GB of memory.
+LIVE_TERRAIN = os.environ.get("FLOOD_LIVE_TERRAIN", "1").strip().lower() not in ("0", "false", "no", "off")
 
 DEFAULTS = dict(
-    res_m=30, buffer_deg=0.15,
+    res_m=30, buffer_deg=0.15, prepared_buffer_deg=0.03,
     channel_threshold_km2=1.0, max_reach_length_m=2000, min_reach_for_curve_m=300,
     channel_manning_n=0.04, min_slope=1e-4, ia_ratio=0.2,
     max_stage_m=15.0, stage_step_m=0.2, min_depth_m=0.10, min_patch_cells=10,
@@ -211,6 +223,19 @@ def accumulate(order, rec, dist, cell_area_km2, runoff_mm, z):
     return area, vol, L, zhead
 
 @njit(cache=True)
+def accumulate_volume(order, rec, cell_area_km2, runoff_mm, extra_vol):
+    """Runoff volume flowing through each cell (mm x km2); extra_vol is water entering from outside the window."""
+    n = rec.size
+    vol = extra_vol.copy()
+    for i in order:
+        vol[i] += runoff_mm[i] * cell_area_km2
+    for i in order:
+        r = rec[i]
+        if r >= 0:
+            vol[r] += vol[i]
+    return vol
+
+@njit(cache=True)
 def build_reaches(order, rec, dist, is_ch, max_len):
     n = rec.size
     n_ch_donors = np.zeros(n, np.int32); ch_donor = np.full(n, -1, np.int64)
@@ -281,11 +306,8 @@ def validate_focus(focus_bbox):
     if w < kw or e > ke or s < ks or n > kn:
         raise ValueError("The area is outside the area the model covers. Draw it inside the country.")
 
-def load_terrain(focus_bbox, p=DEFAULTS, log=print):
-    """Download data for the focus area plus a buffer, and build the flow network."""
-    b = p["buffer_deg"]
-    w, s, e, n = focus_bbox
-    domain = (w - b, s - b, e + b, n + b)
+def download_inputs(domain, p=DEFAULTS, log=print):
+    """Elevation, land cover and soil groups for a lon/lat box, on a UTM grid."""
     grid = make_model_grid(domain, p["res_m"])
     shape = (grid["height"], grid["width"])
 
@@ -307,6 +329,20 @@ def load_terrain(focus_bbox, p=DEFAULTS, log=print):
         soil_group = np.full(shape, GROUP_CODE[p["default_soil_group"]], dtype="uint8")
         soil_note = f"Soil data unavailable; soil group {p['default_soil_group']} used everywhere."
         log(soil_note)
+    return grid, dem, valid, landcover, soil_group, soil_note
+
+def load_terrain(focus_bbox, p=DEFAULTS, log=print):
+    """Terrain and flow network for the focus area: from prepared terrain when possible, otherwise built live."""
+    region = find_region(focus_bbox, p)
+    if region is not None:
+        return load_prepared(focus_bbox, region, p, log)
+    if not LIVE_TERRAIN:
+        raise ValueError("This area isn't prepared yet. Draw your area inside the prepared regions outlined on the map.")
+    b = p["buffer_deg"]
+    w, s, e, n = focus_bbox
+    domain = (w - b, s - b, e + b, n + b)
+    grid, dem, valid, landcover, soil_group, soil_note = download_inputs(domain, p, log)
+    shape = (grid["height"], grid["width"])
 
     log("Tracing how water flows across the land")
     res = float(p["res_m"])
@@ -316,7 +352,175 @@ def load_terrain(focus_bbox, p=DEFAULTS, log=print):
     order = topological_order(rec, valid_flat)
     return dict(focus_bbox=tuple(focus_bbox), domain=domain, grid=grid, shape=shape, dem=dem, valid=valid,
                 landcover=landcover, soil_group=soil_group, soil_note=soil_note,
-                dem_cond=dem_cond, rec=rec, dist=dist, z_flat=z_flat, valid_flat=valid_flat, order=order)
+                dem_cond=dem_cond, rec=rec, dist=dist, z_flat=z_flat, valid_flat=valid_flat, order=order,
+                source="live")
+
+# ----------------------------------------------------------------------------- prepared terrain
+
+LAYERS = dict(dem=("float32", NODATA), demcond=("float32", NODATA), fdir=("uint8", 255), facc=("float32", 0.0),
+              flowlen=("float32", 0.0), zhead=("float32", NODATA), landcover=("uint8", 0), soil=("uint8", 0))
+_INDEX = {"store": None, "data": None}
+
+def _is_url(path):
+    return path.startswith("http://") or path.startswith("https://")
+
+def _join(base, *parts):
+    return "/".join([base.rstrip("/")] + [p.strip("/") for p in parts]) if _is_url(base) else os.path.join(base, *parts)
+
+def _gdal_path(path):
+    return "/vsicurl/" + path if _is_url(path) else path
+
+def terrain_index(reload=False):
+    """index.json of the prepared terrain store, or None when there is none."""
+    if _INDEX["store"] != TERRAIN_STORE or reload:
+        _INDEX.update(store=TERRAIN_STORE, data=None)
+        path = _join(TERRAIN_STORE, "index.json")
+        try:
+            if _is_url(path):
+                with urllib.request.urlopen(path, timeout=20) as r:
+                    _INDEX["data"] = json.load(r)
+            elif os.path.exists(path):
+                with open(path) as f:
+                    _INDEX["data"] = json.load(f)
+        except Exception as err:
+            print(f"Prepared terrain index could not be read ({path}): {err}")
+    return _INDEX["data"]
+
+def prepared_regions():
+    idx = terrain_index()
+    return [dict(name=r["name"], bbox=r["bbox"]) for r in (idx or {}).get("regions", [])]
+
+def find_region(focus_bbox, p=DEFAULTS):
+    """The prepared region that holds the focus area plus its buffer with the widest margin, or None."""
+    b = p["prepared_buffer_deg"]
+    w, s, e, n = focus_bbox[0] - b, focus_bbox[1] - b, focus_bbox[2] + b, focus_bbox[3] + b
+    best, best_margin = None, -1.0
+    for r in (terrain_index() or {}).get("regions", []):
+        rw, rs, re_, rn = r["bbox"]
+        margin = min(w - rw, s - rs, re_ - e, rn - n)
+        if margin >= 0 and margin > best_margin:
+            best, best_margin = r, margin
+    return best
+
+def _codes_from_receivers(rec, nc):
+    """D8 direction code (0-7, 255 = none) for each cell from its receiver index."""
+    n = rec.size
+    code = np.full(n, 255, dtype="uint8")
+    idx = np.nonzero(rec >= 0)[0]
+    dr = rec[idx] // nc - idx // nc
+    dc = rec[idx] % nc - idx % nc
+    lut = np.full((3, 3), 255, dtype="uint8")
+    for k in range(8):
+        lut[D8_DR[k] + 1, D8_DC[k] + 1] = k
+    code[idx] = lut[dr + 1, dc + 1]
+    return code
+
+def precompute_region(name, region_bbox, out_dir, p=DEFAULTS, log=print, inputs=None):
+    """Prepare the terrain for one region and register it in out_dir/index.json.
+
+    inputs: optional (grid, dem, valid, landcover, soil_group, soil_note) instead of downloading (used by tests)."""
+    os.makedirs(os.path.join(out_dir, name), exist_ok=True)
+    grid, dem, valid, landcover, soil_group, soil_note = inputs or download_inputs(tuple(region_bbox), p, log)
+    nr, nc = dem.shape
+    log(f"Tracing how water flows across {nr} x {nc} cells")
+    res = float(grid["res"])
+    dem_cond, rec, dist = priority_flood_d8(dem, valid, res, 1e-6)
+    order = topological_order(rec, valid.ravel())
+    log("Measuring upstream areas and flow paths")
+    area, _, flow_len, zhead = accumulate(order, rec, dist, res * res / 1e6, np.zeros(rec.size), dem_cond.ravel())
+    layers = dict(dem=dem, demcond=dem_cond, fdir=_codes_from_receivers(rec, nc).reshape(nr, nc),
+                  facc=area.reshape(nr, nc), flowlen=flow_len.reshape(nr, nc), zhead=zhead.reshape(nr, nc),
+                  landcover=landcover, soil=soil_group)
+    del rec, dist, order, area, flow_len, zhead
+    for key, (dtype, nodata) in LAYERS.items():
+        log(f"Writing {key}.tif")
+        arr = layers[key].astype(dtype)
+        if dtype == "float32":
+            arr[~valid] = nodata
+        with rasterio.open(os.path.join(out_dir, name, f"{key}.tif"), "w", driver="GTiff", width=nc, height=nr,
+                           count=1, dtype=dtype, crs=grid["crs"], transform=grid["transform"], nodata=nodata,
+                           tiled=True, blockxsize=512, blockysize=512, compress="deflate",
+                           predictor=3 if dtype == "float32" else 2, BIGTIFF="IF_SAFER") as dst:
+            dst.write(arr, 1)
+    meta = dict(name=name, bbox=[round(float(v), 6) for v in region_bbox], res_m=res, width=nc, height=nr,
+                crs=grid["crs"].to_string(), soil_note=soil_note, created=time.strftime("%Y-%m-%d"),
+                channel_threshold_km2=p["channel_threshold_km2"])
+    with open(os.path.join(out_dir, name, "meta.json"), "w") as f:
+        json.dump(meta, f, indent=1)
+    idx_path = os.path.join(out_dir, "index.json")
+    idx = json.load(open(idx_path)) if os.path.exists(idx_path) else dict(version=1, regions=[])
+    idx["regions"] = [r for r in idx["regions"] if r["name"] != name] + [
+        dict(name=name, bbox=meta["bbox"], path=name, res_m=res)]
+    with open(idx_path, "w") as f:
+        json.dump(idx, f, indent=1)
+    log(f"Region '{name}' ready")
+    return meta
+
+def load_prepared(focus_bbox, region, p=DEFAULTS, log=print):
+    """Read the window of a prepared region that covers the focus area plus a small buffer."""
+    log("Reading prepared terrain for this area")
+    b = p["prepared_buffer_deg"]
+    w, s, e, n = focus_bbox
+    domain = (w - b, s - b, e + b, n + b)
+    base = _join(TERRAIN_STORE, region.get("path", region["name"]))
+    src_path = lambda key: _gdal_path(_join(base, f"{key}.tif"))
+    with rasterio.open(src_path("demcond")) as src:
+        crs, tr, H, W = src.crs, src.transform, src.height, src.width
+        res = float(abs(tr.a))
+    x0, y0, x1, y1 = transform_bounds("EPSG:4326", crs, *domain, densify_pts=21)
+    win = window_from_bounds(x0, y0, x1, y1, transform=tr).round_offsets().round_lengths()
+    c0, r0 = max(int(win.col_off), 0), max(int(win.row_off), 0)
+    c1, r1 = min(int(win.col_off + win.width), W), min(int(win.row_off + win.height), H)
+    win = Window(c0, r0, c1 - c0, r1 - r0)
+    pad = Window(c0 - 1, r0 - 1, c1 - c0 + 2, r1 - r0 + 2)
+
+    def read(key, window):
+        dtype, nodata = LAYERS[key]
+        with rasterio.open(src_path(key)) as src:
+            return src.read(1, window=window, boundless=True, fill_value=nodata).astype(dtype)
+
+    dem = read("dem", win)
+    dem_cond = read("demcond", win).astype("float64")
+    fdir_p = read("fdir", pad)
+    facc_p = read("facc", pad).astype("float64")
+    flow_len = read("flowlen", win).astype("float64")
+    zhead = read("zhead", win).astype("float64")
+    landcover = read("landcover", win)
+    soil_group = read("soil", win)
+    nr, nc = dem.shape
+    valid = dem != NODATA
+    soil_group[soil_group == 0] = GROUP_CODE[p["default_soil_group"]]
+
+    # receivers inside the window (flow leaving the window ends there)
+    code = fdir_p[1:-1, 1:-1].ravel()
+    rows, cols = np.divmod(np.arange(nr * nc), nc)
+    has = (code < 8) & valid.ravel()
+    k = np.where(has, code, 0)
+    rr, cc = rows + D8_DR[k], cols + D8_DC[k]
+    inside = has & (rr >= 0) & (rr < nr) & (cc >= 0) & (cc < nc)
+    rec = np.where(inside, rr * nc + cc, -1).astype(np.int64)
+    rec[inside & ~valid.ravel()[np.clip(rr * nc + cc, 0, nr * nc - 1)]] = -1
+    diag = (D8_DR[k] != 0) & (D8_DC[k] != 0)
+    dist = np.where(diag, res * 1.4142135623730951, res)
+
+    # upstream area entering from the ring of cells just outside the window
+    inflow = np.zeros(nr * nc)
+    ring = np.zeros(fdir_p.shape, bool); ring[0, :] = ring[-1, :] = ring[:, 0] = ring[:, -1] = True
+    pr, pc = np.nonzero(ring & (fdir_p < 8))
+    kk = fdir_p[pr, pc]
+    tr_, tc_ = pr + D8_DR[kk] - 1, pc + D8_DC[kk] - 1
+    ok = (tr_ >= 0) & (tr_ < nr) & (tc_ >= 0) & (tc_ < nc)
+    np.add.at(inflow, tr_[ok] * nc + tc_[ok], facc_p[pr[ok], pc[ok]])
+
+    valid_flat = valid.ravel()
+    order = topological_order(rec, valid_flat)
+    grid = dict(crs=crs, transform=rasterio.windows.transform(win, tr), res=res, width=nc, height=nr)
+    facc = facc_p[1:-1, 1:-1].ravel()
+    return dict(focus_bbox=tuple(focus_bbox), domain=domain, grid=grid, shape=(nr, nc), dem=dem, valid=valid,
+                landcover=landcover, soil_group=soil_group, soil_note=None,
+                dem_cond=dem_cond, rec=rec, dist=dist, z_flat=dem_cond.ravel().copy(), valid_flat=valid_flat,
+                order=order, facc_flat=facc, flowlen_flat=flow_len.ravel(), zhead_flat=zhead.ravel(),
+                inflow_area_flat=inflow, source=f"prepared:{region['name']}")
 
 def snap_to_channel(T, area_km2, lat, lon, radius_m=1000):
     grid = T["grid"]
@@ -334,7 +538,7 @@ def snap_to_channel(T, area_km2, lat, lon, radius_m=1000):
 def run_storm(T, rain_mm, rain_hours, wetness="normal", inflows=(), p=DEFAULTS, log=print):
     """Runoff, river flow and flooding for one storm. inflows: list of dicts {lat, lon, flood_m3s, normal_m3s}."""
     grid, shape = T["grid"], T["shape"]
-    res = float(p["res_m"]); cell_m2 = res * res; cell_km2 = cell_m2 / 1e6
+    res = float(grid.get("res", p["res_m"])); cell_m2 = res * res; cell_km2 = cell_m2 / 1e6
     rec, dist, order, z_flat, valid, valid_flat = (T[k] for k in ("rec", "dist", "order", "z_flat", "valid", "valid_flat"))
     nr, nc = shape
 
@@ -343,7 +547,14 @@ def run_storm(T, rain_mm, rain_hours, wetness="normal", inflows=(), p=DEFAULTS, 
     runoff_mm = np.where(valid, scs_runoff(rain_mm, cn, p["ia_ratio"]), 0.0)
 
     log("Working out river flows")
-    area_km2, vol, flow_len, zhead = accumulate(order, rec, dist, cell_km2, runoff_mm.ravel(), z_flat)
+    if "facc_flat" in T:
+        # prepared terrain: upstream area and flow paths are known for the whole region; water from upstream
+        # land outside the window is assumed to run off like the average land inside it
+        area_km2, flow_len, zhead = T["facc_flat"], T["flowlen_flat"], T["zhead_flat"]
+        mean_mm = float(runoff_mm[valid].mean()) if valid.any() else 0.0
+        vol = accumulate_volume(order, rec, cell_km2, runoff_mm.ravel(), T["inflow_area_flat"] * mean_mm)
+    else:
+        area_km2, vol, flow_len, zhead = accumulate(order, rec, dist, cell_km2, runoff_mm.ravel(), z_flat)
     mean_runoff = np.where(area_km2 > 0, vol / np.maximum(area_km2, 1e-12), 0.0)
     L = np.maximum(flow_len, res)
     slope = np.maximum((zhead - z_flat) / L, 0.001)
@@ -431,7 +642,7 @@ def run_storm(T, rain_mm, rain_hours, wetness="normal", inflows=(), p=DEFAULTS, 
         mean_depth_m=round(float(f_depth[flooded].mean()), 2) if flooded.any() else 0.0,
         area_over_1m_km2=round(float((f_depth > 1).sum() * cell_km2), 2),
         mean_runoff_pct=round(float(100 * runoff_mm[valid].mean() / max(rain_mm, 1e-9)), 1),
-        inflows=inflow_info, capped_segments=capped, soil_note=T["soil_note"],
+        inflows=inflow_info, capped_segments=capped, soil_note=T["soil_note"], terrain=T.get("source", "live"),
     )
     return dict(depth=f_depth, permanent_water=f_water, ground=T["dem"][r0:r1, c0:c1], crs=grid["crs"],
                 transform=rasterio.windows.transform(fwin, grid["transform"]), summary=summary)

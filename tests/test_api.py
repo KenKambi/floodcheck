@@ -32,3 +32,12 @@ def test_own_street_map_provider_from_environment(monkeypatch):
     monkeypatch.setenv("FLOOD_STREET_ATTRIBUTION", "© Example")
     sm = client.get("/api/config").json()["street_map"]
     assert sm["tiles"] == ["https://tiles.example.org/{z}/{x}/{y}.png"] and sm["attribution"] == "© Example"
+
+def test_cors_is_off_by_default_and_on_when_configured(monkeypatch):
+    import importlib
+    r = client.get("/api/config", headers={"Origin": "http://localhost:4200"})
+    assert "access-control-allow-origin" not in r.headers
+    monkeypatch.setenv("FLOOD_CORS_ORIGINS", "http://localhost:4200")
+    srv = importlib.reload(server)
+    r = TestClient(srv.app).get("/api/config", headers={"Origin": "http://localhost:4200"})
+    assert r.headers.get("access-control-allow-origin") == "http://localhost:4200"

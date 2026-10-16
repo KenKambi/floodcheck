@@ -3,6 +3,8 @@
 (() => {
   const KENYA = [33.8, -4.8, 42.0, 5.1];
   let MAX_SIDE = 0.40;
+  let REGIONS = [], LIVE_TERRAIN = true;          // prepared terrain regions from the server
+  const PREP_BUFFER = 0.03;                       // must match prepared_buffer_deg in floodmodel.py
   const EXAMPLE_BOX = [39.52, -0.60, 39.80, -0.32];   // demo area
   const TERRAIN_TILES = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png";
   const gibsTiles = (date) => [`https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/MODIS_Terra_CorrectedReflectance_TrueColor/default/${date}/GoogleMapsCompatible_Level9/{z}/{y}/{x}.jpg`];
@@ -36,6 +38,9 @@
 
   const $ = (id) => document.getElementById(id);
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const phoneQuery = matchMedia("(max-width: 760px)");
+  const isPhone = () => phoneQuery.matches;
+  const sheet = { name: "half" };
   const state = { bbox: null, mode: null, firstCorner: null, inflows: [], runId: null, polling: null,
                   result: null, layerOn: {}, profilePts: [], terrain: false, compare: false };
 
@@ -69,9 +74,15 @@
     ],
   });
   const map = new maplibregl.Map({ container: "map", center: [38.2, 0.2], zoom: 5.6, maxBounds: [[30, -9], [46, 9]],
-    maxPitch: 75, style: baseStyle({ dem: { type: "raster-dem", tiles: [TERRAIN_TILES], encoding: "terrarium", tileSize: 256, maxzoom: 14 } }) });
+    maxPitch: 75, attributionControl: false, style: baseStyle({ dem: { type: "raster-dem", tiles: [TERRAIN_TILES], encoding: "terrarium", tileSize: 256, maxzoom: 14 } }) });
   map.addControl(new maplibregl.NavigationControl({ showCompass: true, visualizePitch: true }), "top-right");
   map.addControl(new maplibregl.ScaleControl({ unit: "metric" }), "bottom-left");
+  map.addControl(new maplibregl.AttributionControl({ compact: matchMedia("(max-width: 760px)").matches }), "bottom-right");
+  map.once("load", () => setTimeout(() => {          // start the phone credit line collapsed (tap (i) to read it)
+    document.querySelectorAll(".maplibregl-ctrl-attrib.maplibregl-compact").forEach(el => {
+      el.classList.remove("maplibregl-compact-show"); el.removeAttribute("open");
+    });
+  }, 0));
 
   const emptyFC = { type: "FeatureCollection", features: [] };
   const whenReady = (fn) => (map.getSource("box") ? fn() : map.once("load", fn));
@@ -86,6 +97,20 @@
     fetch("api/config").then(r => r.ok ? r.json() : null).then(c => {
       if (!c) return;
       MAX_SIDE = c.max_side_deg;
+      $("max-km").textContent = fmt(MAX_SIDE * 111, 0);
+      REGIONS = c.prepared_regions || []; LIVE_TERRAIN = c.live_terrain !== false;
+      if (REGIONS.length) {
+        map.addSource("regions", { type: "geojson", data: { type: "FeatureCollection",
+          features: REGIONS.map(r => ({ ...boxFeature(r.bbox).features[0], properties: { name: r.name } })) } });
+        map.addLayer({ id: "regions-line", type: "line", source: "regions",
+          paint: { "line-color": "#4BB8C2", "line-width": 2, "line-dasharray": [3, 2], "line-opacity": 0.9 } }, "box-fill");
+        if (!LIVE_TERRAIN && !state.bbox) {
+          const u = REGIONS.reduce((a, r) => [Math.min(a[0], r.bbox[0]), Math.min(a[1], r.bbox[1]), Math.max(a[2], r.bbox[2]), Math.max(a[3], r.bbox[3])], [180, 90, -180, -90]);
+          fitBox(u);
+        }
+        $("regions-note").hidden = false;
+      }
+      if (state.bbox) setBox(state.bbox);
       if (c.street_map && c.street_map.tiles && c.street_map.tiles.length) {   // server-chosen provider goes first
         STREET_MAPS.unshift({ id: "server", maxzoom: 19, ...c.street_map });
         useStreetMap(0);
@@ -142,14 +167,23 @@
   }
   const normBox = (a, b) => [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.max(a[0], b[0]), Math.max(a[1], b[1])];
   function boxProblem(b) {
-    if (b[2] - b[0] > MAX_SIDE || b[3] - b[1] > MAX_SIDE) return "Too big: keep each side under about 44 km.";
+    if (b[2] - b[0] > MAX_SIDE || b[3] - b[1] > MAX_SIDE) return `Too big: keep each side under about ${fmt(MAX_SIDE * 111, 0)} km.`;
     if (b[0] < KENYA[0] || b[2] > KENYA[2] || b[1] < KENYA[1] || b[3] > KENYA[3]) return "Outside the area the model covers: draw it inside the country.";
+    if (!LIVE_TERRAIN && REGIONS.length && !inPreparedRegion(b)) return "Outside the prepared areas: draw your area inside one of the teal dashed outlines.";
     return null;
   }
+  const inPreparedRegion = (b) => REGIONS.some(r => b[0] - PREP_BUFFER >= r.bbox[0] && b[1] - PREP_BUFFER >= r.bbox[1] &&
+                                                   b[2] + PREP_BUFFER <= r.bbox[2] && b[3] + PREP_BUFFER <= r.bbox[3]);
   const inBox = (lng, lat, b) => b && lng >= b[0] && lng <= b[2] && lat >= b[1] && lat <= b[3];
   const fmt = (n, d = 1) => Number(n).toLocaleString("en-GB", { maximumFractionDigits: d, minimumFractionDigits: 0 });
 
-  function setHint(text) { const h = $("map-hint"); h.textContent = text || ""; h.hidden = !text; }
+  function setHint(text, action) {
+    const h = $("map-hint"); h.textContent = text || ""; h.hidden = !text;
+    if (text && action) {
+      const b = document.createElement("button"); b.type = "button"; b.className = "hint-action"; b.textContent = action.label;
+      b.onclick = action.run; h.appendChild(b);
+    }
+  }
   function setMode(mode) {
     if (state.mode === "profile" && mode !== "profile") setTimeout(() => map.doubleClickZoom.enable(), 400);
     state.mode = mode; state.firstCorner = null;
@@ -159,24 +193,80 @@
     map.getCanvas().style.cursor = mode ? "crosshair" : "";
     setHint(mode === "draw" ? "Click the first corner of your area" :
             mode === "inflow" ? "Click the point where the river enters your area" :
-            mode === "profile" ? "Click points along your line. Double-click to finish." : "");
+            mode === "profile" ? "Tap points along your line, then press Finish." : "");
     if (mode === "profile") { map.doubleClickZoom.disable(); state.profilePts = []; drawProfileLine(); }
+    if (mode) sheetTo("peek");                       // on phones, get the panel out of the way of the map
+  }
+  function finishProfile() {
+    const pts = state.profilePts.slice(); setMode(null);
+    state.profilePts = pts; drawProfileLine();
+    if (pts.length >= 2) runProfile(pts);
+    sheetTo("half");
   }
 
-  function setBox(b) {
+  function setBox(b, placeName) {
     const changed = JSON.stringify(b) !== JSON.stringify(state.bbox);
     state.bbox = b;
-    if (changed && state.weather) { state.weather = null; $("wx-result").innerHTML = `<p class="hint">The area changed. Press <strong>Get rainfall</strong> again for the new area.</p>`; }
+    if (changed || placeName) state.placeName = placeName || null;
     whenReady(() => map.getSource("box").setData(b ? boxFeature(b) : emptyFC));
     const r = $("area-readout");
-    if (!b) { r.textContent = "No area marked yet."; r.classList.remove("is-bad"); }
-    else {
+    renderAreaBanner();
+    if (!b) {
+      r.innerHTML = `<div class="coord-head"><span>Your area (WGS84)</span></div><p class="coord-empty">No area marked yet.</p>`;
+      r.classList.remove("is-bad", "is-set");
+      $("next-rain").hidden = true;
+    } else {
       const [wk, hk] = sideKm(b); const prob = boxProblem(b);
-      r.innerHTML = `<strong>${fmt(wk, 0)} × ${fmt(hk, 0)} km</strong>` + (prob ? `<br>${prob}` : "");
-      r.classList.toggle("is-bad", !!prob);
+      const c = (v) => v.toFixed(5) + "°";
+      r.innerHTML = `<div class="coord-head"><span>Your area (WGS84)</span><button type="button" class="btn-link" id="area-clear">Clear</button></div>
+        ${placeName ? `<p class="coord-place">Around ${esc(placeName)}</p>` : ""}
+        <p class="coord-val"><span class="coord-sep">NW</span>${c(b[3])}, ${c(b[0])}</p>
+        <p class="coord-val"><span class="coord-sep">SE</span>${c(b[1])}, ${c(b[2])}</p>
+        <p class="coord-size"><strong>${fmt(wk, 0)} × ${fmt(hk, 0)} km</strong> · latitude, longitude of the corners</p>
+        ${prob ? `<p class="coord-prob">${esc(prob)}</p>` : ""}`;
+      r.classList.toggle("is-bad", !!prob); r.classList.add("is-set");
+      $("area-clear").onclick = () => { setMode(null); if (placeMarker) { placeMarker.remove(); placeMarker = null; } $("place-results").innerHTML = ""; $("place-q").value = ""; setBox(null); };
       $("step-area").classList.toggle("is-done", !prob);
+      $("next-rain").hidden = !!prob;
     }
+    if (changed) onAreaChanged();
     updateRunButton();
+  }
+
+  const areaName = () => state.placeName || (state.bbox ? "the area you marked" : "");
+  function renderAreaBanner() {
+    const el = $("rain-area");
+    if (!state.bbox) { el.hidden = true; return; }
+    const [wk, hk] = sideKm(state.bbox);
+    el.hidden = false;
+    el.innerHTML = `<span>Area: <strong>${esc(state.placeName || "Area you marked")}</strong> · ${fmt(wk, 0)} × ${fmt(hk, 0)} km</span>
+      <button type="button" class="btn-link" data-goto="area">Change</button>`;
+    el.querySelector("button").onclick = () => showTab("area");
+  }
+  // a new area means the old results, report and rainfall no longer apply
+  function onAreaChanged() {
+    if (state.result) clearResults("Your area changed. Press <strong>Check for floods</strong> to see results for the new area.");
+    if (state.weather) {
+      state.weather = null;
+      if (state.bbox && !boxProblem(state.bbox)) {                 // fetch the rainfall again for the new area
+        $("wx-result").innerHTML = `<p class="hint">Getting rainfall for the new area…</p>`;
+        setTimeout(() => $("wx-btn").click(), 0);
+      } else {
+        $("wx-result").innerHTML = `<p class="hint">The area changed. Press <strong>Get rainfall</strong> again for the new area.</p>`;
+      }
+    }
+  }
+  function clearResults(message) {
+    if (state.polling) return;                                     // a check is running: let it finish
+    state.result = null;
+    whenReady(() => removeResultLayers(map));
+    if (typeof after !== "undefined" && after) removeResultLayers(after);
+    $("results").hidden = true; $("status").hidden = true;
+    $("legend").hidden = true; $("layers-card").hidden = true;
+    $("results-badge").hidden = true;
+    $("results-empty").hidden = false; $("results-empty-text").innerHTML = message;
+    $("report-ready").hidden = true; $("report-empty").hidden = false; $("report-empty-text").innerHTML = message;
+    $("tab-results").classList.remove("is-done");
   }
 
   function updateRunButton() {
@@ -191,14 +281,22 @@
     else if (realMode && !state.weather) msg = "Press “Get rainfall” first, or switch to “Choose myself”.";
     else if (!(+$("rain-mm").value > 0) || !(+$("rain-hours").value > 0)) msg = "Enter the rain amount and how long it falls.";
     btn.disabled = !!msg || running;
-    note.textContent = running ? "Checking… this can take a few minutes." : (msg || "Ready. The first check in a new area takes a few minutes while it downloads data.");
+    $("tab-area").classList.toggle("is-done", !!state.bbox && !boxProblem(state.bbox));
+    $("tab-rain").classList.toggle("is-done", realMode ? !!state.weather : (+$("rain-mm").value > 0 && +$("rain-hours").value > 0));
+    note.textContent = running ? "Checking… this can take a few minutes." : (msg || "Ready. A check takes from a few seconds to a few minutes, depending on the area.");
   }
 
   // ---------- area drawing ----------
   $("draw-btn").onclick = () => setMode(state.mode === "draw" ? null : "draw");
   $("example-btn").onclick = () => {
-    setMode(null); setBox(EXAMPLE_BOX);
-    map.fitBounds([[EXAMPLE_BOX[0], EXAMPLE_BOX[1]], [EXAMPLE_BOX[2], EXAMPLE_BOX[3]]], { padding: 60, duration: reduced() ? 0 : 800 });
+    setMode(null);
+    let ex = EXAMPLE_BOX;
+    if (REGIONS.length && !inPreparedRegion(ex)) {         // use the middle of a prepared region instead
+      const r = REGIONS[0].bbox, cx = (r[0] + r[2]) / 2, cy = (r[1] + r[3]) / 2, h = Math.min(0.05, MAX_SIDE / 2);
+      ex = [cx - h, cy - h, cx + h, cy + h];
+    }
+    setBox(ex, "Example area");
+    fitBox(state.bbox);
   };
 
   // ---------- place search ----------
@@ -214,36 +312,42 @@
     }
     return [r.lon - half(side), r.lat - half(side), r.lon + half(side), r.lat + half(side)];
   }
-  function choosePlace(r) {
+  function choosePlace(r, others) {
     setMode(null);
-    $("place-results").innerHTML = "";
     $("place-q").value = r.name;
     if (placeMarker) placeMarker.remove();
     const el = document.createElement("div"); el.className = "place-pin"; el.setAttribute("aria-label", r.name);
     placeMarker = new maplibregl.Marker({ element: el, anchor: "bottom" }).setLngLat([r.lon, r.lat])
       .setPopup(new maplibregl.Popup({ offset: 18 }).setHTML(`<strong>${esc(r.name)}</strong>`)).addTo(map);
     const b = areaAround(r);
-    setBox(b);
-    map.fitBounds([[b[0], b[1]], [b[2], b[3]]], { padding: 60, duration: reduced() ? 0 : 900 });
-    $("area-readout").insertAdjacentHTML("beforeend",
-      `<br><span class="hint" style="margin:0">Area set around ${esc(r.name)}. Draw it again if you want a different area.</span>`);
+    setBox(b, r.name);                         // a new area also clears the old flood results
+    fitBox(b);                                 // fly there straight away
+    renderAlternatives(r, others || []);
+    if (!boxProblem(b)) showTab("rain");       // next step
+  }
+  // other matches stay in the Area tab, in case the first one was the wrong place
+  function renderAlternatives(chosen, all) {
+    const list = $("place-results");
+    const rest = all.filter(p => p !== chosen);
+    if (!rest.length) { list.innerHTML = ""; return; }
+    list.innerHTML = `<li class="pr-msg">Showing <strong>${esc(chosen.name)}</strong>. Not the right place? Choose another:</li>`
+      + rest.map((p, i) => `<li><button type="button" data-i="${i}"><span class="pr-name">${esc(p.name)}</span><span class="pr-label">${esc(p.label)}</span></button></li>`).join("")
+      + `<li class="pr-attr">Search © OpenStreetMap contributors (Nominatim)</li>`;
+    list.querySelectorAll("button").forEach(btn => btn.onclick = () => choosePlace(rest[+btn.dataset.i], all));
   }
   async function runSearch() {
     const q = $("place-q").value.trim(), list = $("place-results");
     if (q.length < 2) { list.innerHTML = `<li class="pr-msg">Type at least two letters.</li>`; return; }
     const seq = ++searchSeq;
-    list.innerHTML = `<li class="pr-msg">Searching…</li>`;
+    list.innerHTML = `<li class="pr-msg">Searching…</li>`;           // old matches go straight away
+    if (placeMarker) { placeMarker.remove(); placeMarker = null; }
     try {
       const r = await fetch(`api/search?${new URLSearchParams({ q })}`); const j = await r.json();
       if (seq !== searchSeq) return;
       if (!r.ok) throw new Error(j.detail || "The search failed. Try again.");
       const res = j.results || [];
       if (!res.length) { list.innerHTML = `<li class="pr-msg">No places found for “${esc(q)}”. Check the spelling, try a nearby town, or draw the area on the map.</li>`; return; }
-      if (res.length === 1) { choosePlace(res[0]); return; }
-      list.innerHTML = res.map((p, i) => `<li><button type="button" data-i="${i}"><span class="pr-name">${esc(p.name)}</span><span class="pr-label">${esc(p.label)}</span></button></li>`).join("")
-        + `<li class="pr-attr">${esc(j.attribution || "")}</li>`;
-      list.querySelectorAll("button").forEach(btn => btn.onclick = () => choosePlace(res[+btn.dataset.i]));
-      list.querySelector("button").focus();
+      choosePlace(res[0], res);                // best match first; the others are listed as alternatives
     } catch (err) {
       if (seq !== searchSeq) return;
       list.innerHTML = `<li class="pr-msg is-error-text">${esc(err.message.includes("fetch") ? "Can't reach the FloodCheck server." : err.message)}</li>`;
@@ -256,11 +360,15 @@
     const p = [e.lngLat.lng, e.lngLat.lat];
     if (state.mode === "draw") {
       if (!state.firstCorner) { state.firstCorner = p; setHint("Now click the opposite corner"); }
-      else { const b = normBox(state.firstCorner, p); setMode(null); setBox(b); }
+      else { const b = normBox(state.firstCorner, p); setMode(null); setBox(b); sheetTo("half"); }
       return;
     }
-    if (state.mode === "inflow") { addInflow(p[0], p[1]); setMode(null); return; }
-    if (state.mode === "profile") { state.profilePts.push(p); drawProfileLine(); return; }
+    if (state.mode === "inflow") { addInflow(p[0], p[1]); setMode(null); sheetTo("half"); return; }
+    if (state.mode === "profile") {
+      state.profilePts.push(p); drawProfileLine();
+      if (state.profilePts.length >= 2) setHint(`${state.profilePts.length} points. Tap more, or finish the line.`, { label: "Finish", run: finishProfile });
+      return;
+    }
     if (!state.result) return;
     const hitLayers = resultLayerIds();
     const hits = hitLayers.length ? map.queryRenderedFeatures(e.point, { layers: hitLayers }) : [];
@@ -273,9 +381,7 @@
     if (state.mode !== "profile") return;
     // the double-click also fired two clicks: drop the duplicate point
     if (state.profilePts.length > 2) state.profilePts.pop();
-    const pts = state.profilePts.slice(); setMode(null);
-    state.profilePts = pts; drawProfileLine();
-    if (pts.length >= 2) runProfile(pts);
+    finishProfile();
   });
   map.on("mousemove", (e) => {
     if (state.mode === "draw" && state.firstCorner)
@@ -407,7 +513,12 @@
       bbox: state.bbox, rain_mm: +$("rain-mm").value, rain_hours: +$("rain-hours").value,
       wetness: document.querySelector('input[name="wetness"]:checked').value,
       inflows: state.inflows.map(f => ({ lat: f.lat, lon: f.lng, flood_m3s: +f.flood, normal_m3s: +(f.normal || 0) })),
+      place_name: state.placeName || null,
     };
+    state.runPlace = { name: state.placeName || "Area you marked", bbox: state.bbox.slice() };
+    statusFollow.on = true; statusFollow.lastLen = -1;   // follow the progress list until the user scrolls away
+    showTab("results");
+    $("results-empty").hidden = true; $("results-badge").hidden = true;
     showStatus("Starting the flood check", "", []);
     $("results").hidden = true;
     try {
@@ -418,12 +529,13 @@
       state.polling = setInterval(poll, 1500);
       updateRunButton(); poll();
     } catch (err) {
-      showError(err.message.includes("fetch") ? "Can't reach the model server. Check the Colab notebook is still running." : err.message);
+      showError(err.message.includes("fetch") ? "Can't reach the FloodCheck server. Check your internet connection and try again." : err.message);
     }
   };
 
   function showStatus(title, text, log, current) {
     const s = $("status"); s.hidden = false; s.classList.remove("is-error");
+    if (sheet.name === "peek") sheetTo("half");
     $("status-title").textContent = title; $("status-text").textContent = text;
     const ul = $("status-log"); ul.innerHTML = "";
     log.forEach((m, i) => {
@@ -431,12 +543,37 @@
       if (current && i === log.length - 1) li.className = "is-current";
       ul.appendChild(li);
     });
+    followStatus();
   }
+
+  // ---------- keep the progress list in view while a check runs ----------
+  const statusFollow = { on: false, lastLen: -1 };
+  function followStatus() {
+    if (!statusFollow.on) return;
+    const box = $("panel-scroll"), s = $("status");
+    const n = $("status-log").children.length;
+    if (n === statusFollow.lastLen && s.dataset.followed === "1") return;   // nothing new to show
+    statusFollow.lastLen = n; s.dataset.followed = "1";
+    requestAnimationFrame(() => {
+      const top = s.offsetTop - 8;                                          // panel-scroll is the offset parent
+      const bottom = s.offsetTop + s.offsetHeight - box.clientHeight + 12;  // status bottom at the panel's bottom edge
+      // show the newest step: the bottom of the status card, without hiding its title when it fits
+      const target = bottom <= top ? Math.min(Math.max(box.scrollTop, bottom), top) : bottom;
+      if (Math.abs(target - box.scrollTop) > 2) box.scrollTo({ top: target, behavior: reduced() ? "auto" : "smooth" });
+    });
+  }
+  // the user taking over the scroll stops the auto-follow for this check
+  ["wheel", "touchmove", "keydown"].forEach(ev => $("panel-scroll").addEventListener(ev, (e) => {
+    if (ev === "keydown" && !["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(e.key)) return;
+    statusFollow.on = false;
+  }, { passive: true }));
   function showError(msg) {
     stopPolling();
+    statusFollow.on = true; statusFollow.lastLen = -1; $("status").dataset.followed = "";
     const s = $("status"); s.hidden = false; s.classList.add("is-error");
     $("status-title").textContent = "The flood check didn't finish";
     $("status-text").textContent = msg; $("status-log").innerHTML = "";
+    followStatus();
   }
   function stopPolling() { if (state.polling) clearInterval(state.polling); state.polling = null; updateRunButton(); }
 
@@ -448,7 +585,7 @@
     try {
       const r = await fetch(`api/runs/${state.runId}`); j = await r.json();
       if (!r.ok) throw new Error(j.detail || "Lost track of the run.");
-    } catch (err) { pollBusy = false; showError("Lost contact with the model server. Check the Colab notebook is still running."); return; }
+    } catch (err) { pollBusy = false; showError("Lost contact with the FloodCheck server. It may have restarted (for example if it ran out of memory). Please try again, or try a smaller area."); return; }
     pollBusy = false;
     if (!state.polling) return;
     if (j.status === "queued") showStatus("Waiting for another check to finish", "", [], false);
@@ -513,7 +650,7 @@
       rows.appendChild(row);
     });
     const card = $("layers-card");
-    if (card.hidden && matchMedia("(max-width: 760px)").matches) card.removeAttribute("open");
+    if (card.hidden && isPhone()) card.removeAttribute("open");
     card.hidden = false;
   }
 
@@ -600,8 +737,22 @@
     } else { $("expo-fac-head").textContent = ""; $("expo-fac").innerHTML = ""; }
 
     $("res-download").href = state.result.geotiff_url;
+    $("res-pdf").href = state.result.report_url || "#";
+    const rp = state.runPlace || { name: "Area you marked", bbox: state.bbox };
+    const c = (v) => v.toFixed(4) + "°";
+    $("res-place").innerHTML = `<span class="sec-label" style="margin:0">Results for</span>
+      <p class="res-place-name">${esc(rp.name)}</p>
+      <p class="res-place-coords">${c(rp.bbox[3])}, ${c(rp.bbox[0])} to ${c(rp.bbox[1])}, ${c(rp.bbox[2])}</p>`;
+    $("report-place").textContent = rp.name;
+    $("pdf-msg").textContent = "";
+    $("report-ready").hidden = false; $("report-empty").hidden = true;
+    $("results-empty").hidden = true;
+    $("results-badge").hidden = false; $("tab-results").classList.add("is-done");
+    $("status").hidden = true;                       // the progress list has done its job; results go to the top
     $("results").hidden = false;
-    $("results").scrollIntoView({ behavior: reduced() ? "auto" : "smooth", block: "start" });
+    sheetTo("half");
+    statusFollow.on = false; statusFollow.lastLen = -1; $("status").dataset.followed = "";
+    $("panel-scroll").scrollTop = 0;
   }
 
   let popup;
@@ -820,4 +971,126 @@
     });
     window.addEventListener("resize", () => { if (state.compare) { after.resize(); placeSwipe(); } });
   })();
+
+  // ---------- phone layout: the panel is a bottom sheet over a full-screen map ----------
+  function sheetMetrics() {
+    const hdr = document.querySelector(".brandbar").getBoundingClientRect().height;
+    const avail = window.innerHeight - hdr;
+    const peek = $("sheet-handle").offsetHeight + document.querySelector(".run-bar").offsetHeight;
+    return { hdr, peek, half: Math.max(peek, Math.round(avail * 0.52)), full: Math.max(peek, avail - 10) };
+  }
+  function applySheet(px) {
+    const app = document.querySelector(".app");
+    if (!isPhone()) { app.style.removeProperty("--sheet-h"); return; }
+    const m = sheetMetrics();
+    app.style.setProperty("--hdr", `${m.hdr}px`);
+    app.style.setProperty("--sheet-h", `${Math.round(px)}px`);
+  }
+  function sheetTo(name) {
+    if (!isPhone()) return;
+    sheet.name = name;
+    applySheet(sheetMetrics()[name]);
+    const open = name !== "peek";
+    $("sheet-label").textContent = open ? "Show more map" : "Show the steps";
+    $("sheet-handle").setAttribute("aria-expanded", String(open));
+    document.querySelector(".panel").dataset.sheet = name;
+  }
+  function scrollPanelTo(el) {        // scroll only the panel, never the page
+    const box = $("panel-scroll");
+    const top = el.getBoundingClientRect().top - box.getBoundingClientRect().top + box.scrollTop - 8;
+    box.scrollTo({ top, behavior: reduced() ? "auto" : "smooth" });
+  }
+  function fitBox(b) {
+    if (!b) return;
+    const bottom = isPhone() ? sheetMetrics()[sheet.name] : 0;
+    map.fitBounds([[b[0], b[1]], [b[2], b[3]]], { padding: { top: 70, left: 24, right: 24, bottom: bottom + 30 },
+      duration: reduced() ? 0 : 850, maxZoom: 15 });
+  }
+  (() => {
+    const handle = $("sheet-handle"), panel = document.querySelector(".panel");
+    let drag = null;
+    handle.addEventListener("pointerdown", (e) => {
+      if (!isPhone()) return;
+      drag = { y: e.clientY, h: panel.getBoundingClientRect().height, moved: false };
+      handle.setPointerCapture(e.pointerId); panel.classList.add("is-dragging");
+    });
+    handle.addEventListener("pointermove", (e) => {
+      if (!drag) return;
+      const m = sheetMetrics(), dy = drag.y - e.clientY;
+      if (Math.abs(dy) > 6) drag.moved = true;
+      if (drag.moved) applySheet(Math.min(Math.max(drag.h + dy, m.peek), m.full));
+    });
+    const end = () => {
+      if (!drag) return;
+      panel.classList.remove("is-dragging");
+      const m = sheetMetrics(), h = panel.getBoundingClientRect().height, moved = drag.moved; drag = null;
+      if (!moved) { sheetTo(sheet.name === "peek" ? "half" : "peek"); return; }
+      const nearest = ["peek", "half", "full"].reduce((a, k) => Math.abs(m[k] - h) < Math.abs(m[a] - h) ? k : a, "peek");
+      sheetTo(nearest);
+    };
+    handle.addEventListener("pointerup", end);
+    handle.addEventListener("pointercancel", end);
+    handle.addEventListener("keydown", (e) => {
+      if (e.key === "ArrowUp") { e.preventDefault(); sheetTo(sheet.name === "peek" ? "half" : "full"); }
+      if (e.key === "ArrowDown") { e.preventDefault(); sheetTo(sheet.name === "full" ? "half" : "peek"); }
+    });
+    handle.addEventListener("click", (e) => { if (e.detail === 0) sheetTo(sheet.name === "peek" ? "half" : "peek"); });  // keyboard
+    const relayout = () => { if (isPhone()) sheetTo(sheet.name); else applySheet(0); };
+    window.addEventListener("resize", relayout);
+    phoneQuery.addEventListener("change", relayout);
+    relayout();
+  })();
+
+  // ---------- tabs: Area · Rain · Results · Report ----------
+  function showTab(name) {
+    document.querySelectorAll(".tab").forEach(t => {
+      const on = t.dataset.tab === name;
+      t.setAttribute("aria-selected", String(on)); t.tabIndex = on ? 0 : -1;
+    });
+    document.querySelectorAll(".pane").forEach(p => { p.hidden = p.id !== `pane-${name}`; });
+    $("panel-scroll").scrollTop = 0;
+    if (isPhone() && sheet.name === "peek") sheetTo("half");
+  }
+  document.querySelectorAll(".tab").forEach(t => {
+    t.onclick = () => showTab(t.dataset.tab);
+    t.onkeydown = (e) => {                                   // arrow keys move between tabs
+      const tabs = [...document.querySelectorAll(".tab")], i = tabs.indexOf(t);
+      const k = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
+      if (k) { e.preventDefault(); const n = tabs[(i + k + tabs.length) % tabs.length]; n.focus(); showTab(n.dataset.tab); }
+    };
+  });
+  document.querySelectorAll("[data-goto]").forEach(b => b.onclick = () => showTab(b.dataset.goto));
+  // the PDF is made on the server when asked for: fetch it, so problems show as a message instead of a silent failure
+  $("res-pdf").addEventListener("click", async (e) => {
+    e.preventDefault();
+    const b = $("res-pdf"), msg = $("pdf-msg"), url = b.getAttribute("href");
+    if (!state.result || !url || url === "#") { msg.textContent = "Run a flood check first."; return; }
+    if (b.classList.contains("is-busy")) return;
+    const label = b.lastChild.textContent;
+    b.classList.add("is-busy"); b.lastChild.textContent = "Preparing the PDF…";
+    msg.classList.remove("is-error-text"); msg.textContent = "Making the report: this takes a few seconds.";
+    try {
+      const r = await fetch(url);
+      if (!r.ok) {
+        let detail = `The report couldn't be made (error ${r.status}).`;
+        try { const j = await r.json(); if (j.detail) detail = j.detail; } catch (_) {}
+        if (r.status === 404) detail = "The server doesn't know this report. Make sure the server is running the latest backend files, then run the check again.";
+        throw new Error(detail);
+      }
+      const blob = await r.blob();
+      const cd = r.headers.get("Content-Disposition") || "";
+      const name = (cd.match(/filename="?([^";]+)"?/) || [])[1] || "floodcheck_report.pdf";
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob); a.download = name;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+      msg.textContent = `Downloaded: ${name}`;
+    } catch (err) {
+      msg.classList.add("is-error-text");
+      msg.textContent = err.message.includes("fetch") ? "Can't reach the FloodCheck server. Check it is still running." : err.message;
+    } finally {
+      b.classList.remove("is-busy"); b.lastChild.textContent = label;
+    }
+  });
+  setBox(state.bbox);
 })();

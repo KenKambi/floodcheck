@@ -3,7 +3,9 @@ services:
     build: .
     image: atlas/floodcheck:latest
     ports:
-      - "8000:8000"
+      - "8000:7860"                 # open http://localhost:8000
+    environment:
+      - FLOOD_CORS_ORIGINS=         # e.g. http://localhost:4200 for an Angular dev server
     volumes:
-      - ./results:/app/results      # keep GeoTIFF results on the host
+      - ./results:/home/user/app/results
     restart: unless-stopped

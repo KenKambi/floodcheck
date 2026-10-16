@@ -1,5 +1,9 @@
 # FloodCheck user guide
 
+The left panel has four tabs: **Area** (where), **Rain** (how much), **Results** (what happens) and
+**Report** (download a PDF to share). A tick on a tab means that part is done. The green
+**Check for floods** button at the bottom is always there.
+
 FloodCheck shows where flood water could reach in your area after heavy rain. You do not need any special training to use it.
 
 ## Before you start
@@ -65,6 +69,12 @@ Under it is a short list of **what to do**.
 - **Tap anywhere** on the map to see how deep the water is there.
 - Homes in water, flooded roads and schools or health facilities are marked. Tap them for details. Use **What the map shows** to turn them on or off.
 - **Before / after photos** lets you compare satellite images from two dates, for example before and after a past flood, to check the map against what really happened.
+
+## Sharing the results
+
+Open the **Report** tab and press **Download PDF report**. The PDF has the flood map, the risk level,
+the key numbers, what is in the water and what to do, ready to print or send. If you search for or
+draw a new area, the old results are cleared so you never mix up two places.
 
 ## Important
 

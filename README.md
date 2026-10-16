@@ -1,3 +1,14 @@
+---
+title: FloodCheck
+emoji: 🌊
+colorFrom: blue
+colorTo: green
+sdk: docker
+app_port: 7860
+pinned: false
+short_description: See where flood water could reach in your community
+---
+
 # FloodCheck
 
 **Atlas Geosystems — Community Centered Geosystems**
@@ -26,19 +37,27 @@ floodcheck/
 │   ├── exposure.py            Buildings, roads, schools and health facilities in the water
 │   ├── weather.py             Real rainfall, ground wetness and river flow for any date
 │   ├── imagery.py             Sentinel-1 and Sentinel-2 images as map tiles
+│   ├── report.py              PDF flood report (map, risk level, numbers, advice)
 │   ├── geocode.py             Place search (village, town, school, market or coordinates)
 │   └── static/                The dashboard (served by server.py)
 │       ├── index.html
 │       ├── css/floodcheck.css Styles in the Atlas Geosystems colours
 │       ├── js/floodcheck.js   Map, place search, inputs, model runs, results, risk card
 │       └── assets/            Logo files
+├── terrain/                   Prepared terrain (index.json + one folder per region), see below
+├── tools/
+│   ├── precompute_terrain.py  Prepares terrain for a region once, ahead of time
+│   └── warmup.py              Compiles the model engine during the Docker build
 ├── results/                   GeoTIFF outputs (created at run time, not in git)
 ├── notebooks/
-│   └── floodcheck_colab.ipynb Builds and runs the same app in Google Colab
+│   ├── floodcheck_colab.ipynb Builds and runs the same app in Google Colab
+│   └── precompute_terrain_colab.ipynb  Prepares terrain in Colab (plenty of memory, free)
 ├── tests/                     Smoke tests (no internet needed)
 └── docs/
     ├── user-guide.md          Plain-language guide for community users
     ├── api.md                 API reference for developers
+    ├── prepared-terrain.md    How to prepare terrain and host it
+    ├── hosting-render.md      Step-by-step hosting on Render
     └── concept/               Project concept note
 ```
 
@@ -108,7 +127,11 @@ docker compose up --build
 
 Open http://localhost:8000. Results are saved to `./results` on your machine.
 
-### Option C — Google Colab (no installation)
+### Option C — Hugging Face Spaces (free public link)
+
+See **[docs/hosting-huggingface.md](docs/hosting-huggingface.md)** for step-by-step instructions. The block at the very top of this README is the Space's settings; leave it in place.
+
+### Option D — Google Colab (no installation)
 
 Open `notebooks/floodcheck_colab.ipynb` in Colab and choose **Runtime → Run all**. The last cell prints a link to the app. Keep the Colab tab open while you use it.
 
@@ -121,8 +144,15 @@ Set these in your shell, a `.env`-aware host, or the container environment (see 
 | `FLOOD_HOST` | `127.0.0.1` | Address the server listens on (`0.0.0.0` to allow other devices) |
 | `FLOOD_PORT` | `8000` | Port |
 | `FLOOD_RESULTS_DIR` | `./results` | Where GeoTIFF results are written |
+| `FLOOD_CORS_ORIGINS` | *(empty)* | Websites allowed to call the API from the browser, comma-separated (for example an Angular frontend on `http://localhost:4200` or GitHub Pages). Empty means only the built-in dashboard |
 | `FLOOD_STREET_TILES` | *(empty)* | Your own street map tile URL(s), comma-separated, e.g. a MapTiler or Stadia URL with your key. Used before the built-in providers |
 | `FLOOD_STREET_ATTRIBUTION` | `© OpenStreetMap contributors` | Credit line shown for your own street map |
+| `FLOOD_TERRAIN` | `terrain/` next to `run.py` | Folder or `https://` address holding prepared terrain (`index.json`) |
+| `FLOOD_LIVE_TERRAIN` | `1` | `0` = only allow areas inside prepared regions (needed on small servers); `1` = build other areas live (needs 2–4 GB memory) |
+| `FLOOD_MAX_SIDE_DEG` | `0.40` | Largest area side a user can draw, in degrees (0.40 ≈ 44 km). Lower it on small servers, e.g. `0.15` |
+| `FLOOD_TERRAIN_CACHE` | `2` | Areas kept in memory for quick repeat checks. Use `1` (or `0`) on small servers |
+| `FLOOD_KEEP_RUNS` | `10` | Finished runs kept for the map, layers and downloads; older ones are forgotten |
+| `PORT` | *(set by host)* | Used instead of `FLOOD_PORT` when the hosting platform sets it (Render does) |
 
 Model settings (resolution, buffer, channel threshold, Manning's n and others) are in `DEFAULTS` at the top of `backend/floodmodel.py`. The largest area a user can draw is `MAX_FOCUS_DEG`; the allowed country extent is the bounding-box constant next to it.
 
@@ -158,12 +188,41 @@ python -m pytest -q
 
 The tests run the model on a made-up valley and check the server, dashboard files and input checks. They need no internet, so they are a quick way to confirm a new machine or container is set up correctly.
 
+## Prepared terrain (recommended for hosting)
+
+The slowest and most memory-hungry part of a check is building the terrain: downloading elevation, land
+cover and soils, then tracing how water flows across tens of millions of cells. None of this depends on
+the rain, so FloodCheck can do it **once per region, ahead of time**, and each check then reads only the
+small window it needs.
+
+| | Built live (old way) | Prepared terrain |
+|---|---|---|
+| A 2 × 2 km area | ~1.4 million cells (the 17 km buffer dominates) | ~90,000 cells |
+| The largest area | ~6.7 million cells | ~2.9 million cells |
+| Time before the rain calculation | minutes (downloads + flow tracing) | seconds |
+| Upstream water | only from inside the 17 km buffer | from the whole prepared region |
+
+Short version:
+
+```bash
+python tools/precompute_terrain.py --name region-a --bbox WEST SOUTH EAST NORTH --out terrain
+```
+
+or use `notebooks/precompute_terrain_colab.ipynb` (Colab has the memory this step needs). Then either keep the
+`terrain/` folder in the project, or upload it to object storage and set `FLOOD_TERRAIN` to its address.
+Full instructions, sizes and limits: `docs/prepared-terrain.md`.
+
 ## Deploying to a server
+
+Step-by-step for Render: `docs/hosting-render.md`.
+
+For a free public pilot, use Hugging Face Spaces (Option C). For an always-on launch:
+
 
 - Run **one** process only (`run.py` already does). Runs, the job queue and cached terrain live in memory; several workers would split them.
 - Put it behind a reverse proxy (nginx, Caddy) with HTTPS if it will be public.
-- Give it at least **4 GB RAM** and 2 CPUs; a full-size area at 30 m uses a few hundred MB per cached area.
-- Results in `results/` are not cleaned up automatically; clear old GeoTIFFs from time to time.
+- Memory: with **prepared terrain**, 1 GB is enough for moderate areas (set `FLOOD_LIVE_TERRAIN=0`, `FLOOD_TERRAIN_CACHE=1` and, on 512 MB, `FLOOD_MAX_SIDE_DEG=0.1`). Building terrain live needs **2–4 GB**. Dense city areas need more because of the number of buildings.
+- Old runs and their GeoTIFFs are removed automatically after `FLOOD_KEEP_RUNS` newer runs.
 - The server needs outbound internet access to the data sources below.
 - Place search uses the public Nominatim service, which allows light use only. For heavy public traffic, run your own Nominatim or switch `NOMINATIM_URL` in `backend/geocode.py` to a paid geocoder.
 

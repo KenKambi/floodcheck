@@ -21,6 +21,13 @@ os.makedirs(RESULTS_DIR, exist_ok=True)
 app = FastAPI(title="FloodCheck rapid flood model")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")   # logo and other page assets
 
+# Allow other websites (e.g. a separate Angular frontend) to call this API.
+# FLOOD_CORS_ORIGINS="http://localhost:4200,https://example.github.io"  ("*" allows any site)
+_cors = [o.strip().rstrip("/") for o in os.environ.get("FLOOD_CORS_ORIGINS", "").split(",") if o.strip()]
+if _cors:
+    from fastapi.middleware.cors import CORSMiddleware
+    app.add_middleware(CORSMiddleware, allow_origins=_cors, allow_methods=["GET", "POST"], allow_headers=["*"])
+
 class Inflow(BaseModel):
     lat: float
     lon: float
@@ -33,11 +40,24 @@ class RunRequest(BaseModel):
     rain_hours: float = Field(gt=0, le=240)
     wetness: str = Field(default="normal", pattern="^(dry|normal|wet)$")
     inflows: list[Inflow] = []
+    place_name: str | None = Field(default=None, max_length=160)   # shown on results and in the PDF
 
 RUNS = {}                       # run id -> state dict
 TERRAIN = OrderedDict()         # cached terrain for recently used areas (the slow part)
-TERRAIN_CACHE_SIZE = 2
+TERRAIN_CACHE_SIZE = max(int(os.environ.get("FLOOD_TERRAIN_CACHE", "2")), 0)   # areas kept in memory (1 on small servers)
 JOBS = queue.Queue()
+KEEP_RUNS = max(int(os.environ.get("FLOOD_KEEP_RUNS", "10")), 1)   # finished runs kept for the map, layers and downloads
+
+def prune_runs():
+    """Forget the oldest finished runs (and their GeoTIFFs) so memory doesn't grow with every check."""
+    finished = sorted((r.get("finished", 0), rid) for rid, r in RUNS.items() if r["status"] in ("done", "failed"))
+    for _, rid in finished[:max(len(finished) - KEEP_RUNS, 0)]:
+        old = RUNS.pop(rid, None)
+        if old and old.get("tif_path"):
+            try:
+                os.remove(old["tif_path"])
+            except OSError:
+                pass
 
 def terrain_key(bbox):
     return tuple(round(v, 4) for v in bbox)
@@ -62,7 +82,8 @@ def worker():
             else:
                 terrain = fm.load_terrain(req.bbox, log=log)
                 terrain["exposure"] = ex.load_exposure(req.bbox, log=log)
-                TERRAIN[key] = terrain
+                if TERRAIN_CACHE_SIZE:
+                    TERRAIN[key] = terrain
                 while len(TERRAIN) > TERRAIN_CACHE_SIZE:
                     TERRAIN.popitem(last=False)
             result = fm.run_storm(terrain, req.rain_mm, req.rain_hours, req.wetness,
@@ -88,6 +109,7 @@ def worker():
                 f"The model stopped with an internal error: {err}"
         finally:
             run["finished"] = time.time()
+            prune_runs()
             JOBS.task_done()
 
 threading.Thread(target=worker, daemon=True).start()
@@ -98,7 +120,8 @@ def index():
 
 @app.get("/api/config")
 def config():
-    out = dict(kenya_bbox=fm.KENYA_BBOX, max_side_deg=fm.MAX_FOCUS_DEG)
+    out = dict(kenya_bbox=fm.KENYA_BBOX, max_side_deg=fm.MAX_FOCUS_DEG,
+               prepared_regions=fm.prepared_regions(), live_terrain=fm.LIVE_TERRAIN)
     tiles = os.environ.get("FLOOD_STREET_TILES", "").strip()       # optional own street map provider
     if tiles:
         out["street_map"] = dict(tiles=[t.strip() for t in tiles.split(",") if t.strip()],
@@ -109,6 +132,8 @@ def config():
 def create_run(req: RunRequest):
     try:
         fm.validate_focus(req.bbox)
+        if not fm.LIVE_TERRAIN and fm.find_region(req.bbox) is None:
+            raise ValueError("This area isn't prepared yet. Draw your area inside the prepared regions outlined on the map.")
     except ValueError as err:
         raise HTTPException(status_code=422, detail=str(err))
     run_id = uuid.uuid4().hex[:10]
@@ -132,7 +157,7 @@ def run_status(run_id: str):
                cached_terrain=run["cached_terrain"])
     if run["status"] == "done":
         out.update(summary=run["summary"], corners=run["corners"],
-                   image_url=f"api/runs/{run_id}/depth.png", geotiff_url=f"api/runs/{run_id}/depth.tif",
+                   image_url=f"api/runs/{run_id}/depth.png", geotiff_url=f"api/runs/{run_id}/depth.tif", report_url=f"api/runs/{run_id}/report.pdf",
                    layers={k: f"api/runs/{run_id}/layers/{k}.geojson" for k in run.get("layers", {})})
     if run["status"] == "failed":
         out["error"] = run["error"]
@@ -151,6 +176,29 @@ def run_tif(run_id: str):
     if "tif_path" not in run:
         raise HTTPException(status_code=409, detail="This run hasn't finished yet.")
     return FileResponse(run["tif_path"], media_type="image/tiff", filename=f"flood_depth_{run_id}.tif")
+
+@app.get("/api/runs/{run_id}/report.pdf")
+def run_report(run_id: str):
+    """Printable PDF report: map, flood risk, key numbers, what is in the water, advice."""
+    run = get_run(run_id)
+    if run.get("status") != "done":
+        raise HTTPException(status_code=409, detail="This run hasn't finished yet.")
+    if "pdf" not in run:
+        try:
+            import report          # imported here so the app still runs if the PDF library is missing
+        except ImportError as err:
+            raise HTTPException(status_code=500, detail="The PDF library isn't installed on the server. "
+                                "Run: pip install -r requirements.txt (it adds reportlab), then restart FloodCheck.") from err
+        try:
+            run["pdf"] = report.build_pdf(run, os.path.join(STATIC_DIR, "assets", "logo-full.png"))
+        except Exception as err:
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=f"The report couldn't be made: {err}")
+    stamp = time.strftime("%Y%m%d", time.localtime(run.get("finished", time.time())))
+    place = "".join(ch if ch.isalnum() else "_" for ch in (run["request"].place_name or "area"))[:40].strip("_") or "area"
+    return Response(run["pdf"], media_type="application/pdf",
+                    headers={"Content-Disposition": f'attachment; filename="floodcheck_{place}_{stamp}.pdf"',
+                             "Cache-Control": "no-store"})
 
 @app.get("/api/runs/{run_id}/depth")
 def run_depth_at(run_id: str, lat: float, lon: float):

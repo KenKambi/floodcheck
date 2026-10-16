@@ -10,6 +10,7 @@ All endpoints are served by `backend/server.py`. Paths are relative, so the app 
 | `POST` | `/api/runs` | Start a run. Returns `{id, queue_position, cached_terrain}` |
 | `GET` | `/api/runs/{id}` | Status: `queued`, `running` (with `step`, `log`), `done` or `failed` (with `error`) |
 | `GET` | `/api/runs/{id}/depth.png` | Coloured flood depth image (place it with `corners` from the status) |
+| `GET` | `/api/runs/{id}/report.pdf` | Printable PDF report: map, flood risk, key numbers, what is in the water, advice |
 | `GET` | `/api/runs/{id}/depth.tif` | Flood depth GeoTIFF (metres, UTM) |
 | `GET` | `/api/runs/{id}/depth?lat=&lon=` | Depth at one point: `{depth_m, permanent_water}` |
 | `GET` | `/api/runs/{id}/layers/{name}.geojson` | `buildings`, `roads` or `facilities` in the flood water |
