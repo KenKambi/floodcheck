@@ -1,10 +1,15 @@
-# FloodCheck web app
+# FloodCheck web app — Docker image for Render (also works on any Docker host)
 FROM python:3.11-slim
+
+# System libraries the Python packages need but the slim image leaves out:
+#   libexpat1  -> rasterio's built-in GDAL (fixes "libexpat.so.1: cannot open shared object file")
+#   libgomp1   -> OpenMP, used by numba and scipy
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libexpat1 libgomp1 ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    FLOOD_HOST=0.0.0.0 \
-    FLOOD_PORT=8000 \
     FLOOD_RESULTS_DIR=/app/results \
     NUMBA_CACHE_DIR=/app/.numba_cache
 
@@ -16,6 +21,7 @@ COPY backend ./backend
 COPY run.py .
 RUN mkdir -p results .numba_cache
 
-EXPOSE 8000
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s CMD python -c "import urllib.request,os; urllib.request.urlopen(f'http://127.0.0.1:{os.environ[\"FLOOD_PORT\"]}/api/config', timeout=4)"
-CMD ["python", "run.py"]
+# Render tells the app which port to use through $PORT (10000 by default).
+# The app must listen on 0.0.0.0, not localhost, or Render can't reach it.
+EXPOSE 10000
+CMD ["sh", "-c", "python run.py --host 0.0.0.0 --port ${PORT:-10000}"]
